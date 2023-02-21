@@ -51,7 +51,7 @@ def train(config):
     nframes              = config.get('nframes', 40)
     chunk_step           = config.get('chunk_step', 20)
     seed                 = config.get('seed', 1234)
-    checkpoint_path      = config.get('checkpoint_path', '')
+    checkpoint_path      = config.get('checkpoint_path', None)
 
     # Setup
     np.random.seed(seed)
@@ -64,15 +64,12 @@ def train(config):
     # trainer = TRAINER( train_config, model_config)
 
     # Load checkpoint if the path is given 
-    if checkpoint_path != "":
-        iteration = trainer.load_checkpoint( checkpoint_path)
-        iteration += 1  # next iteration is iteration + 1
-        
+    
     # Load training data
     trainset = DiarizationDataset(
         config['train_config']['training_dir'], 
         chunk_size=nframes,
-        chunk_step=chunk_step,
+        frame_shift=chunk_step,
     )    
     train_loader = DataLoader(
         trainset, 
@@ -89,23 +86,25 @@ def train(config):
         config['train_config']['eval_dir'],
         mode='test', 
         chunk_size=nframes,
-        chunk_step=chunk_step,
+        frame_shift=chunk_step,
     )    
     eval_loader = DataLoader(
         evalset, 
         num_workers=config['train_config']['num_workers'],
         shuffle=True,
-        batch_size=batch_size,
+        batch_size=1,
         pin_memory=True,
         drop_last=True,
-        collate_fn=evalset.collate_fn
+        collate_fn=evalset.collate_fn_infer
     )
 
+    """
     logger = WandbLogger(
         name=config['train_config']['exp_name'],
         offline=True,
         project='SpeakerDiarization'
     )
+    """
 
     model = LightningModel(config)
 
@@ -120,7 +119,7 @@ def train(config):
         fast_dev_run=config['train_config']['dev'], 
         gpus=config['train_config']['gpu'], 
         max_epochs=max_epoch, 
-        checkpoint_callback=True,
+        num_sanity_val_steps=0,
         callbacks=[
             EarlyStopping(
                 monitor='val/loss',
@@ -131,14 +130,18 @@ def train(config):
                 ),
             model_checkpoint_callback
         ],
-        logger=logger,
-        resume_from_checkpoint=config['train_config']['model_checkpoint'],
-        distributed_backend='ddp',
+        #logger=logger,
+        resume_from_checkpoint=checkpoint_path,
+        distributed_backend='dp',
         auto_lr_find=True
         )
-
+    
+    if checkpoint_path is not None:
+        iteration = trainer.load_checkpoint(checkpoint_path)
+        iteration += 1  # next iteration is iteration + 1
+    
     # Fit model
-    trainer.fit(model, train_dataloader=train_loader, val_dataloaders=eval_loader)
+    trainer.fit(model, train_dataloaders=train_loader, val_dataloaders=eval_loader)
 
     print('\n\nCompleted Training...\nTesting the model with checkpoint -', model_checkpoint_callback.best_model_path)    
 
