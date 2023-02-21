@@ -31,8 +31,8 @@ class LightningModel(pl.LightningModule):
     def count_trainable_parameters(self):
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
 
-    def forward(self, x, x_len):
-        return self.model(x, x_len)
+    def forward(self, x):
+        return self.model(x)
 
     def configure_optimizers(self):
         optimizer = torch.optim.Adam( self.model.parameters(),
@@ -40,7 +40,7 @@ class LightningModel(pl.LightningModule):
                                             betas=(0.5,0.999),
                                             weight_decay=0.0)
         sch = torch.optim.lr_scheduler.StepLR(
-                                optimizer=self.optimizer,
+                                optimizer=optimizer,
                                 **self.lr_scheduler
                             )
         return {

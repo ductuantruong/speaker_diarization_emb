@@ -125,12 +125,12 @@ class TransformerDiarization(nn.Module):
                                                     pad=0,
                                                     n_mels=feat_dim)
         else:
-            self.feature_extract = UpstreamExpert(feat_type)
+            self.feature_extract = UpstreamExpert(upstream_model=feat_type)
             # self.feature_extract = torch.hub.load('s3prl/s3prl', 'hubert_local', ckpt=feat_type)
-            if len(self.feature_extract.model.encoder.layers) == 24 and hasattr(self.feature_extract.model.encoder.layers[23].self_attn, "fp32_attention"):
-                self.feature_extract.model.encoder.layers[23].self_attn.fp32_attention = False
-            if len(self.feature_extract.model.encoder.layers) == 24 and hasattr(self.feature_extract.model.encoder.layers[11].self_attn, "fp32_attention"):
-                self.feature_extract.model.encoder.layers[11].self_attn.fp32_attention = False
+            if len(self.feature_extract.upstream.model.encoder.layers) == 24 and hasattr(self.feature_extract.upstream.model.encoder.layers[23].self_attn, "fp32_attention"):
+                self.feature_extract.upstream.model.encoder.layers[23].self_attn.fp32_attention = False
+            if len(self.feature_extract.upstream.model.encoder.layers) == 24 and hasattr(self.feature_extract.upstream.model.encoder.layers[11].self_attn, "fp32_attention"):
+                self.feature_extract.upstream.model.encoder.layers[11].self_attn.fp32_attention = False
             self.feat_num = self.get_feat_num()
             self.feature_weight = nn.Parameter(torch.zeros(self.feat_num))
             # for param in self.feature_extract.parameters():
@@ -164,15 +164,16 @@ class TransformerDiarization(nn.Module):
         self.beta = nn.Parameter(torch.rand(1)[0] + torch.Tensor([0.5])[0])
 
     def get_feat_num(self):
-        self.feature_extract.eval()
-        wav = [torch.randn(self.sr).to(next(self.feature_extract.parameters()).device)]
-        with torch.no_grad():
-            features = self.feature_extract(wav)
-        select_feature = features[self.feature_selection]
-        if isinstance(select_feature, (list, tuple)):
-            return len(select_feature)
-        else:
-            return 1
+        # self.feature_extract.eval()
+        # wav = [torch.randn(self.sr).to(next(self.feature_extract.parameters()).device)]
+        # with torch.no_grad():
+            # features = self.feature_extract(wav)
+        # select_feature = features[self.feature_selection]
+        # if isinstance(select_feature, (list, tuple)):
+            # return len(select_feature)
+        # else:
+            # return 1
+        return 1
 
     def fix_except_embedding(self, requires_grad=False):
         for name, param in self.named_parameters():
