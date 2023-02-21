@@ -6,14 +6,11 @@
         "model_type": "eend_clustering",
         "max_iter": 500000,
         "max_epoch": 50,
-        "optimize_param": {
-            "learning_rate": 1e-4,
-            "max_grad_norm": 5.0,
-            "lr_scheduler":{
-                "step_size": 100000,
-                "gamma": 0.5,
-                "last_epoch": -1
-            }
+        "lr": 1e-4,
+        "lr_scheduler":{
+            "step_size": 100000,
+            "gamma": 0.5,
+            "last_epoch": -1
         },
         "batch_size": 16,
         "nframes": 800,
@@ -24,7 +21,8 @@
         "checkpoint_path": "",
         "epochs_per_eval": 1,
         "num_workers": 16,
-        "gpu": "-1"
+        "gpu": "-1",
+        "dev": 0
     },
     "infer_config": {
         "model_type": "TSVAD",
