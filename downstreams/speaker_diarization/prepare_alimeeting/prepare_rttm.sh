@@ -1,4 +1,4 @@
-work_dir=/export/home2/tuantd/diarization/UniSpeech/downstreams/speaker_diarization/data/Train_Ali_far
+work_dir=/export/home2/tuantd/diarization/UniSpeech/downstreams/speaker_diarization/data/Eval_Ali/Eval_Ali_far
 textgrid_dir=$work_dir/textgrid_dir
 dia_rttm_dir=$work_dir/rttm_groundtruth
 wav_dir=$work_dir/audio_dir
