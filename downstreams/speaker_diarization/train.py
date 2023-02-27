@@ -10,9 +10,10 @@ from pathlib import Path
 from importlib import import_module
 import json
 import torch.nn as nn
+from functools import partial
 
 from torch.utils.data import DataLoader
-from utils.dataset import DiarizationDataset
+from downstreams.speaker_diarization.utils.dataset import DiarizationDataset
 from models.lightning_model import LightningModel
 
 
@@ -23,33 +24,99 @@ from pytorch_lightning.callbacks.early_stopping import EarlyStopping
 from pytorch_lightning.loggers import TensorBoardLogger, WandbLogger
 from pytorch_lightning import Trainer
 
+def collate_fn_ns(batch, n_speakers, spkidx_tbl):
+    xs, ts, ss, ns, ilens = list(zip(*batch))
+    valid_chunk_indices1 = [i for i in range(len(ts))
+                            if ts[i].shape[1] == n_speakers]
+    valid_chunk_indices2 = []
+
+    # n_speakers (rec-data) > n_speakers (model)
+    invalid_chunk_indices1 = [i for i in range(len(ts))
+                              if ts[i].shape[1] > n_speakers]
+
+    ts = list(ts)
+    ss = list(ss)
+    for i in invalid_chunk_indices1:
+        s = np.sum(ts[i], axis=0)
+        cs = ts[i].shape[0]
+        if len(s[s > 0.5]) <= n_speakers:
+            # n_speakers (chunk-data) <= n_speakers (model)
+            # update valid_chunk_indices2
+            valid_chunk_indices2.append(i)
+            idx_arr = np.where(s > 0.5)[0]
+            ts[i] = ts[i][:, idx_arr]
+            ss[i] = ss[i][idx_arr]
+            if len(s[s > 0.5]) < n_speakers:
+                # n_speakers (chunk-data) < n_speakers (model)
+                # update ts[i] and ss[i]
+                n_speakers_real = len(s[s > 0.5])
+                zeros_ts = np.zeros((cs, n_speakers), dtype=np.float32)
+                zeros_ts[:, :-(n_speakers-n_speakers_real)] = ts[i]
+                ts[i] = zeros_ts
+                mones_ss = -1 * np.ones((n_speakers,), dtype=np.int64)
+                mones_ss[:-(n_speakers-n_speakers_real)] = ss[i]
+                ss[i] = mones_ss
+            else:
+                # n_speakers (chunk-data) == n_speakers (model)
+                pass
+        else:
+            # n_speakers (chunk-data) > n_speakers (model)
+            pass
+
+    # valid_chunk_indices: chunk indices using for training
+    valid_chunk_indices = sorted(valid_chunk_indices1 + valid_chunk_indices2)
+
+    ilens = np.array(ilens)
+    ilens = ilens[valid_chunk_indices]
+    ns = np.array(ns)[valid_chunk_indices]
+    ss = np.array([ss[i] for i in range(len(ss))
+                  if ts[i].shape[1] == n_speakers])
+    xs = [xs[i] for i in range(len(xs)) if ts[i].shape[1] == n_speakers]
+    ts = [ts[i] for i in range(len(ts)) if ts[i].shape[1] == n_speakers]
+    xs = np.array([np.pad(x, [(0, np.max(ilens) - len(x))],
+                          'constant', constant_values=(-1,)) for x in xs])
+    ts = np.array([np.pad(t, [(0, np.max(ilens) - len(t)), (0, 0)],
+                          'constant', constant_values=(+1,)) for t in ts])
+
+    if spkidx_tbl is not None:
+        # Update global speaker ID
+        all_n_speakers = np.max(spkidx_tbl) + 1
+        bs = len(ns)
+        ns = np.array([
+                np.arange(
+                    all_n_speakers,
+                    dtype=np.int64
+                    ).reshape(all_n_speakers, 1)] * bs)
+        ss = np.array([spkidx_tbl[ss[i]] for i in range(len(ss))])
+
+    return (xs, ts, ss, ns, ilens)
 
 
-def collate_fn(batches):
-    feat_batches = [item['feat'] for item in batches]
-    label_batches = [item['label'] for item in batches]
-    vector_batches = [item['spk_vector'] for item in batches]
-    index_batches = [item['index_spks'] for item in batches]
-    
-    feat_batches = torch.stack(feat_batches)
-    label_batches = torch.stack(label_batches)
-    vector_batches = torch.stack(vector_batches)
-    
-    egs = {
-        'feat': feat_batches,
-        'label': label_batches,
-        "spk_vector": vector_batches,
-        "index_spks": index_batches,
-    }
-    
-    return egs
+
+def collate_fn(batch):
+    xs, ts, ss, ns, ilens = list(zip(*batch))
+    ilens = np.array(ilens)
+
+    # import time
+    # time.sleep(1999)
+    xs = np.array([np.pad(
+        x, [(0, np.max(ilens) - len(x))],
+        'constant', constant_values=(-1,)
+        ) for x in xs])
+    ts = np.array([np.pad(
+        t, [(0, np.max(ilens) - len(t)), (0, 0)],
+        'constant', constant_values=(+1,)
+        ) for t in ts])
+    ss = np.array(ss)
+    ns = np.array(ns)
+
+    return (xs, ts, ss, ns, ilens)
+
 
 def train(config): 
     # Initial
     max_epoch            = config.get('max_epoch', 100000)
-    batch_size           = config.get('batch_size', 8)
-    nframes              = config.get('nframes', 40)
-    chunk_step           = config.get('chunk_step', 20)
+    batch_size           = config.get('batch_size', 4)
     seed                 = config.get('seed', 1234)
     checkpoint_path      = config.get('checkpoint_path', None)
 
@@ -58,18 +125,13 @@ def train(config):
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)   
 
-    # Initial trainer
-    # module = import_module('trainer.{}'.format(trainer_type), package=None)
-    # TRAINER = getattr( module, 'Trainer')
-    # trainer = TRAINER( train_config, model_config)
-
-    # Load checkpoint if the path is given 
     
     # Load training data
     trainset = DiarizationDataset(
-        config['train_config']['training_dir'], 
-        chunk_size=nframes,
-        frame_shift=chunk_step,
+        mode= 'train',
+        data_dir=config['train_config']['training_dir'], 
+        chunk_size=750,
+        frame_shift=320,
     )    
     train_loader = DataLoader(
         trainset, 
@@ -83,10 +145,10 @@ def train(config):
     
     # Load evaluation data
     evalset = DiarizationDataset(
-        config['train_config']['eval_dir'],
-        mode='test', 
-        chunk_size=nframes,
-        frame_shift=chunk_step,
+        mode= 'train',
+        data_dir=config['train_config']['eval_dir'],
+        chunk_size=750,
+        frame_shift=320,
     )    
     eval_loader = DataLoader(
         evalset, 
@@ -146,71 +208,6 @@ def train(config):
     print('\n\nCompleted Training...\nTesting the model with checkpoint -', model_checkpoint_callback.best_model_path)    
 
 
-    """
-    loss_log = dict()
-    # while iteration <= max_iter:
-    while epoch < max_epoch:
-        trainer.model.train()
-        for i, batch in enumerate(train_loader):
-            
-            iteration, loss_detail, lr = trainer.step(batch, iteration=iteration)
-
-            # Keep Loss detail
-            for key,val in loss_detail.items():
-                if key not in loss_log.keys():
-                    loss_log[key] = list()
-                loss_log[key].append(val)
-            
-            # Save model per N iterations
-            # if iteration % iters_per_checkpoint == 0:
-            #     checkpoint_path =  output_directory / "{}_{}".format(time.strftime("%m-%d_%H-%M", time.localtime()),iteration)
-            #     trainer.save_checkpoint( checkpoint_path)
-
-            # Show log per M iterations
-            if iteration % iters_per_log == 0 and len(loss_log.keys()) > 0:
-                mseg = 'Iter {}:'.format( iteration)
-                for key,val in loss_log.items():
-                    mseg += '  {}: {:.6f}'.format(key,np.mean(val))
-                mseg += '  lr: {:.6f}'.format(lr)
-                logger.info(mseg)
-                loss_log = dict()
-
-            # if iteration > max_iter:
-            #     break
-            
-        epoch += 1
-
-        if epoch % epochs_per_eval == 0:
-            eval_loss = []
-            trainer.model.eval()
-            for i, batch in enumerate(eval_loader):
-                with torch.no_grad():
-                    for key in batch.keys():
-                        if key != "index_spks":
-                            batch[key] = batch[key].to("cuda:1")
-                    preds = trainer.model(batch)
-                    targets = batch["label"]
-                    bs, num_frames = targets.shape[0:2]
-                    loss_batches = []
-                    for idx, idx_batch in enumerate(batch["index_spks"]):
-                        loss_batches.append(torch.nn.BCELoss(reduction='sum')(preds[idx, :, idx_batch], batch["label"][idx, :, idx_batch]) / num_frames)
-                    loss = torch.stack(loss_batches).mean()
-                    # loss = nn.BCELoss(reduction='sum')(preds, targets) / num_frames / bs
-                    eval_loss.append(loss.item())
-            mseg = 'Epoch {}:'.format( epoch)
-            mseg += "Eval loss: {}".format(np.mean(eval_loss))
-            logger.info(mseg)
-
-        checkpoint_path =  output_directory / "{}_{}".format(time.strftime("%m-%d_%H-%M", time.localtime()),epoch)
-        trainer.save_checkpoint( checkpoint_path)
-
-        if epoch > max_epoch:
-            break
-        
-
-    print('Finished')
-    """
-        
 
 if __name__ == "__main__":
 

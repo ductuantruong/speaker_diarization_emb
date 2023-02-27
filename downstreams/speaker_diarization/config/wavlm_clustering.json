@@ -12,7 +12,7 @@
             "gamma": 0.5,
             "last_epoch": -1
         },
-        "batch_size": 16,
+        "batch_size": 4,
         "nframes": 800,
         "chunk_step": 600,
         "iters_per_checkpoint": 10000,
@@ -41,8 +41,8 @@
     },
     "model_config": {
         "n_speakers": 4,
-        "all_n_speakers": 0,
-        "feat_dim": 1024,
+        "all_n_speakers": 452,
+        "feat_dim": 768,
         "n_units": 256,
         "n_heads": 8,
         "n_layers": 6,

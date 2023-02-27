@@ -93,7 +93,7 @@ class TransformerDiarization(nn.Module):
                  n_layers,
                  dropout_rate,
                  spk_emb_dim,
-                 sr=8000,
+                 sr=16000,
                  frame_shift=256,
                  frame_size=1024,
                  context_size=0,
@@ -192,22 +192,23 @@ class TransformerDiarization(nn.Module):
 
     def get_feat(self, xs):
         wav_len = xs.shape[-1]
-        chunk_size = int(wav_len / self.frame_shift)
-        chunk_size = int(chunk_size / self.subsampling)
+        # chunk_size = int(wav_len / self.frame_shift)
+        # chunk_size = int(wav_len / self.subsampling)
 
         self.feature_extract.eval()
         if self.update_extract:
-            xs = self.resample(xs)
-            feature = self.feature_extract([sample for sample in xs])
+            # xs = self.resample(xs)
+            feature = self.feature_extract([torch.tensor(sample).to('cuda') for sample in xs])
         else:
             with torch.no_grad():
                 if self.feat_type == 'fbank':
                     feature = self.feature_extract(xs) + 1e-6  # B x feat_dim x time_len
                     feature = feature.log()
                 else:
-                    xs = self.resample(xs)
-                    feature = self.feature_extract([sample for sample in xs])
+                    # xs = self.resample(xs)
+                    feature = self.feature_extract([torch.tensor(sample).to('cuda') for sample in xs])
 
+        """
         if self.feat_type != "fbank" and self.feat_type != "mfcc":
             feature = feature[self.feature_selection]
             if isinstance(feature, (list, tuple)):
@@ -218,11 +219,12 @@ class TransformerDiarization(nn.Module):
             norm_weights = F.softmax(self.feature_weight, dim=-1).unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
             feature = (norm_weights * feature).sum(dim=0)
             feature = torch.transpose(feature, 1, 2) + 1e-6
-
+        """
         feature = self.instance_norm(feature)
         feature = self.splice(feature, self.context_size)
         feature = feature[:, :, ::self.subsampling]
-        feature = F.interpolate(feature, chunk_size, mode=self.interpolate_mode)
+        feature = torch.transpose(feature, 1, 2)
+        feature = F.interpolate(feature, 750, mode=self.interpolate_mode)
         feature = torch.transpose(feature, 1, 2)
 
         if self.feature_grad_mult != 1.0:
@@ -266,7 +268,8 @@ class TransformerDiarization(nn.Module):
         alpha = torch.clamp(self.alpha, min=sys.float_info.epsilon)
 
         return {'spk_loss':spk_loss,
-                'pit_loss': pit_loss}
+                'pit_loss': pit_loss,
+                'loss': spk_loss + pit_loss}
 
 
     def batch_estimate(self, xs):
@@ -381,7 +384,6 @@ class TransformerDiarization(nn.Module):
         label[label==-1] = 0
         valid_spk_mask = torch.gather(torch.sum(ts, dim=1), 1, sigmas).transpose(0, 1)  # 3 x B
         valid_spk_mask = (torch.flatten(valid_spk_mask) > 0).float()  # B*3
-
         valid_spk_loss_num = torch.sum(valid_spk_mask).item()
         if valid_spk_loss_num > 0:
             loss = F.cross_entropy(logits, label, reduction='none') * valid_spk_mask / valid_spk_loss_num

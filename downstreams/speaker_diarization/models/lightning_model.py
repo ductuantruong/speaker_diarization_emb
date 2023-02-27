@@ -5,9 +5,87 @@ import torch.nn.functional as F
 import pytorch_lightning as pl
 
 import pandas as pd
+import numpy as np
 import torch_optimizer as optim
 
 from models.models import TransformerDiarization
+from itertools import permutations
+
+
+def pit_loss(pred, label):
+    """
+    Permutation-invariant training (PIT) cross entropy loss function.
+
+    Args:
+      pred:  (T,C)-shaped pre-activation values
+      label: (T,C)-shaped labels in {0,1}
+
+    Returns:
+      min_loss: (1,)-shape mean cross entropy
+      label_perms[min_index]: permutated labels
+      sigma: permutation
+    """
+
+    device = pred.device
+    T = len(label)
+    C = label.shape[-1]
+    label_perms_indices = [
+            list(p) for p in permutations(range(C))]
+    P = len(label_perms_indices)
+    perm_mat = torch.zeros(P, T, C, C).to(device)
+
+    for i, p in enumerate(label_perms_indices):
+        perm_mat[i, :, torch.arange(label.shape[-1]), p] = 1
+
+    x = torch.unsqueeze(torch.unsqueeze(label, 0), -1).to(device)
+    y = torch.arange(P * T * C).view(P, T, C, 1).to(device)
+
+    broadcast_label = torch.broadcast_tensors(x, y)[0]
+    allperm_label = torch.matmul(
+            perm_mat, broadcast_label
+            ).squeeze(-1)
+
+    x = torch.unsqueeze(pred, 0)
+    y = torch.arange(P * T).view(P, T, 1)
+    broadcast_pred = torch.broadcast_tensors(x, y)[0]
+
+    # broadcast_pred: (P, T, C)
+    # allperm_label: (P, T, C)
+    losses = F.binary_cross_entropy_with_logits(
+               broadcast_pred,
+               allperm_label,
+               reduction='none')
+    mean_losses = torch.mean(torch.mean(losses, dim=1), dim=1)
+    min_loss = torch.min(mean_losses) * len(label)
+    min_index = torch.argmin(mean_losses)
+    sigma = list(permutations(range(label.shape[-1])))[min_index]
+
+    return min_loss, allperm_label[min_index], sigma
+
+
+def batch_pit_loss(ys, ts, ilens=None):
+    """
+    PIT loss over mini-batch.
+
+    Args:
+      ys: B-length list of predictions
+      ts: B-length list of labels
+
+    Returns:
+      loss: (1,)-shape mean cross entropy over mini-batch
+      sigmas: B-length list of permutation
+    """
+    if ilens is None:
+        ilens = [t.shape[0] for t in ts]
+
+    loss_w_labels_w_sigmas = [pit_loss(y[:ilen, :], t[:ilen, :])
+                              for (y, t, ilen) in zip(ys, ts, ilens)]
+    losses, _, sigmas = zip(*loss_w_labels_w_sigmas)
+    loss = torch.sum(torch.stack(losses))
+    n_frames = np.sum([ilen for ilen in ilens])
+    loss = loss / n_frames
+
+    return loss, sigmas
 
 
 class LightningModel(pl.LightningModule):
@@ -53,41 +131,36 @@ class LightningModel(pl.LightningModule):
         }
         
     def training_step(self, batch, batch_idx):
-        input = batch
-        for key in batch.keys():
-            if key != "index_spks":
-                input[key] = input[key].to(self.device)
+        xs, ts, ss, ns, ilens = batch
+        ys, spksvecs = self(xs)
 
-        preds = self(input)
-        bs, tframe = input["label"].shape[0:2]
-
-        loss_batches = []
-        for idx, idx_batch in enumerate(input["index_spks"]):
-            loss_batches.append(self.diar_criterion(reduction='sum')(preds[idx, :, idx_batch], input["label"][idx, :, idx_batch]) / tframe) 
-        loss = torch.stack(loss_batches).mean()
+        loss_dict = self.model.get_loss(batch, ys, spksvecs)
         
-        return {'loss': loss}
+        return loss_dict
     
     def training_epoch_end(self, outputs):
         loss = torch.tensor([x['loss'] for x in outputs]).mean()
+        spk_loss = torch.tensor([x['spk_loss'] for x in outputs]).mean()
+        pit_loss = torch.tensor([x['pit_loss'] for x in outputs]).mean()
         self.log('train/loss' , loss, on_step=False, on_epoch=True, prog_bar=True)
+        self.log('train/pit_loss' , pit_loss, on_step=False, on_epoch=True, prog_bar=True)
+        self.log('train/spk_loss' , spk_loss, on_step=False, on_epoch=True, prog_bar=True)
 
     def validation_step(self, batch, batch_idx):
-        for key in batch.keys():
-            if key != "index_spks":
-                batch[key] = batch[key]
-        preds = self(batch)
-        targets = batch["label"]
-        bs, num_frames = targets.shape[0:2]
-        loss_batches = []
-        for idx, idx_batch in enumerate(batch["index_spks"]):
-            loss_batches.append(self.diar_criterion(reduction='sum')(preds[idx, :, idx_batch], batch["label"][idx, :, idx_batch]) / num_frames)
-        loss = torch.stack(loss_batches).mean()
-        return {'val_loss':loss}
+        xs, ts, ss, ns, ilens = batch
+        ys, spksvecs = self(xs)
+
+        loss_dict = self.model.get_loss(batch, ys, spksvecs)
+        
+        return loss_dict
 
     def validation_epoch_end(self, outputs):
-        val_loss = torch.tensor([x['val_loss'] for x in outputs]).mean()
-        self.log('val/loss' , val_loss, on_step=False, on_epoch=True, prog_bar=True)
+        loss = torch.tensor([x['loss'] for x in outputs]).mean()
+        spk_loss = torch.tensor([x['spk_loss'] for x in outputs]).mean()
+        pit_loss = torch.tensor([x['pit_loss'] for x in outputs]).mean()
+        self.log('val/loss' , loss, on_step=False, on_epoch=True, prog_bar=True)
+        self.log('val/pit_loss' , pit_loss, on_step=False, on_epoch=True, prog_bar=True)
+        self.log('val/spk_loss' , spk_loss, on_step=False, on_epoch=True, prog_bar=True)
 
     def test_step(self, batch, batch_idx):
         pass
